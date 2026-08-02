@@ -110,6 +110,7 @@ class NestKpmCollectorXapp(xAppBase):
             collect_start_time = str(collect_start_time)
 
         throughput_metric = self.profile.measurement_names[0]
+        sst_metric = "DRB.NetworkSlicing.SST.UEID"
         time_scale_factor = self.profile.time_scale_factor
 
         if time_scale_factor <= 0:
@@ -140,23 +141,39 @@ class NestKpmCollectorXapp(xAppBase):
 
             value = values[0]
 
-            if (
-                isinstance(value, bool) or
-                not isinstance(value, (int, float))
-            ):
-                raise ValueError(
-                    f"UE {raw_ue_id} measurement "
-                    f"{throughput_metric} is not numeric"
-                )
+            if (isinstance(value, bool) or not isinstance(value, (int, float))):
+                raise ValueError(f"UE {raw_ue_id} measurement {throughput_metric} is not numeric")
 
-            granularity_period_ms = ue_report.get(
-                "granulPeriod"
-            )
+            sst = None
 
-            if (
-                not isinstance(granularity_period_ms, int) or
-                granularity_period_ms <= 0
-            ):
+            if self.profile.sst_source == "kpm":
+                sst_values = measurements.get(sst_metric)
+
+                if not isinstance(sst_values, list) or len(sst_values) != 1:
+                    raise ValueError(
+                        f"UE {raw_ue_id} measurement "
+                        f"{sst_metric} must contain one value"
+                    )
+
+                sst_value = sst_values[0]
+
+                if isinstance(sst_value, bool) or not isinstance(sst_value, int):
+                    raise ValueError(
+                        f"UE {raw_ue_id} measurement "
+                        f"{sst_metric} is not an integer"
+                    )
+
+                if not 0 <= sst_value <= 255:
+                    raise ValueError(
+                        f"UE {raw_ue_id} measurement "
+                        f"{sst_metric} is outside the SST range"
+                    )
+
+                sst = sst_value
+
+            granularity_period_ms = ue_report.get("granulPeriod")
+
+            if (not isinstance(granularity_period_ms, int) or granularity_period_ms <= 0):
                 raise ValueError(
                     f"UE {raw_ue_id} has an invalid "
                     "granularity period"
@@ -171,7 +188,7 @@ class NestKpmCollectorXapp(xAppBase):
                     ric_subscription_id=str(ric_subscription_id),
                     e2_event_instance_id=int(e2_event_instance_id),
                     ue_id=str(raw_ue_id),
-                    sst=None,
+                    sst=sst,
                     kpm_throughput_dl_kbps=(
                         kpm_throughput_dl_kbps
                     ),
