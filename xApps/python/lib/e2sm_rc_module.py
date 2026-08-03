@@ -22,23 +22,227 @@ class e2sm_rc_module(object):
         self.requestorID %= 255
         return self.requestorID
 
-    def _build_ric_control_request(self, control_header, control_msg, ack_request):
-        requestorID = [0x00, self.get_requestor_id()]
-        ran_func_id = [0x00, self.ran_func_id]
-        control_header_len = len(control_header)
-        control_mgs_len = len(control_msg)
-        ric_control_ack_request = ack_request
-        # asn1tools has some issue to generate RIC-Control-Request from asn1 files, therefore we need to build it manually
-        total_len = 33 + control_header_len + control_mgs_len
-        msg = [0x00, 0x04, 0x00, total_len, 0x00, 0x00, 0x05, 0x00, 0x1d, 0x00, 0x05, 0x00, *requestorID, 0x00, 0x00, 0x00, 0x05,
-               0x00, 0x02, *ran_func_id,
-               0x00, 0x16, 0x00, control_header_len+1, control_header_len, *control_header,
-               0x00, 0x17, 0x00, control_mgs_len+1, control_mgs_len, *control_msg,
-               0x00, 0x15, 0x00, 0x01, ric_control_ack_request  << 6]
+    @staticmethod
+    def _encode_aper_length(length):
+        """Encode one unfragmented APER length determinant."""
+        if isinstance(length, bool) or not isinstance(length, int) or not 0 <= length <= 16383:
+            raise ValueError("APER length must be an integer in the range 0..16383")
 
-        payload = bytes(hex_num for hex_num in msg)
+        if length < 128:
+            return [length]
+
+        return [0x80 | (length >> 8), length & 0xff]
+
+    def _build_ric_control_request(self, control_header, control_msg, ack_request):
+        requestor_id = self.get_requestor_id()
+        ran_func_id = self.ran_func_id
+
+        if isinstance(requestor_id, bool) or not isinstance(requestor_id, int) or not 0 <= requestor_id <= 65535:
+            raise ValueError("RIC requestor ID must be an integer in the range 0..65535")
+
+        if isinstance(ran_func_id, bool) or not isinstance(ran_func_id, int) or not 0 <= ran_func_id <= 4095:
+            raise ValueError("RAN Function ID must be an integer in the range 0..4095")
+
+        if isinstance(ack_request, bool) or not isinstance(ack_request, int) or not 0 <= ack_request <= 1:
+            raise ValueError("RIC control acknowledgement request must be either 0 or 1")
+
+        control_header = bytes(control_header)
+        control_msg = bytes(control_msg)
+
+        requestor_id_bytes = requestor_id.to_bytes(2, byteorder="big")
+        ran_func_id_bytes = ran_func_id.to_bytes(2, byteorder="big")
+        control_header_len = len(control_header)
+        control_msg_len = len(control_msg)
+        control_header_length = self._encode_aper_length(control_header_len)
+        control_msg_length = self._encode_aper_length(control_msg_len)
+
+        body = [
+            0x00, 0x00, 0x05,
+            0x00, 0x1d, 0x00, 0x05, 0x00, *requestor_id_bytes, 0x00, 0x00,
+            0x00, 0x05, 0x00, 0x02, *ran_func_id_bytes,
+            0x00, 0x16, 0x00,
+            *self._encode_aper_length(len(control_header_length) + control_header_len),
+            *control_header_length,
+            *control_header,
+            0x00, 0x17, 0x00,
+            *self._encode_aper_length(len(control_msg_length) + control_msg_len),
+            *control_msg_length,
+            *control_msg,
+            0x00, 0x15, 0x00, 0x01, ack_request << 6,
+        ]
+
+        msg = [
+            0x00, 0x04, 0x00,
+            *self._encode_aper_length(len(body)),
+            *body,
+        ]
+
+        return bytes(msg)
+
+    @staticmethod
+    def _ran_parameter_element(parameter_id, value_type, value):
+        return {
+            "ranParameter-ID": parameter_id,
+            "ranParameter-valueType": (
+                "ranP-Choice-ElementFalse",
+                {"ranParameter-value": (value_type, value)},
+            ),
+        }
+
+    @staticmethod
+    def _ran_parameter_structure(parameter_id, children):
+        return {
+            "ranParameter-ID": parameter_id,
+            "ranParameter-valueType": (
+                "ranP-Choice-Structure",
+                {"ranParameter-Structure": {"sequence-of-ranParameters": children}},
+            ),
+        }
+
+    @staticmethod
+    def _ran_parameter_list(parameter_id, items):
+        return {
+            "ranParameter-ID": parameter_id,
+            "ranParameter-valueType": (
+                "ranP-Choice-List",
+                {"ranParameter-List": {"list-of-ranParameter": items}},
+            ),
+        }
+
+    @staticmethod
+    def _validate_slice_prb_quota(quota):
+        if not isinstance(quota, dict):
+            raise ValueError("each slice quota must be a dictionary")
+
+        required_fields = (
+            "plmn",
+            "sst",
+            "min_prb_ratio",
+            "max_prb_ratio",
+            "dedicated_prb_ratio",
+        )
+        missing_fields = [field for field in required_fields if field not in quota]
+
+        if missing_fields:
+            raise ValueError(f"slice quota is missing required fields: {', '.join(missing_fields)}")
+
+        plmn = quota["plmn"]
+        sst = quota["sst"]
+        sd = quota.get("sd")
+
+        if not isinstance(plmn, str) or len(plmn) not in (5, 6) or not plmn.isdigit():
+            raise ValueError("PLMN must contain five or six decimal digits")
+
+        if isinstance(sst, bool) or not isinstance(sst, int) or not 1 <= sst <= 255:
+            raise ValueError("SST must be an integer in the range 1..255")
+
+        if sd is not None and (isinstance(sd, bool) or not isinstance(sd, int) or not 0 <= sd <= 0xFFFFFF):
+            raise ValueError("SD must be absent or an integer in the range 0..16777215")
+
+        ratios = {}
+
+        for field in ("min_prb_ratio", "max_prb_ratio", "dedicated_prb_ratio"):
+            value = quota[field]
+
+            if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 100:
+                raise ValueError(f"{field} must be an integer in the range 0..100")
+
+            ratios[field] = value
+
+        if not ratios["dedicated_prb_ratio"] <= ratios["min_prb_ratio"] <= ratios["max_prb_ratio"]:
+            raise ValueError("PRB ratios must satisfy dedicated <= minimum <= maximum")
+
+        return {
+            "plmn": plmn,
+            "sst": sst,
+            "sd": sd,
+            **ratios,
+        }
+
+    def _build_slice_prb_ratio_group(self, quota):
+        plmn = plmn_to_bytes(plmn_string_to_bcd(quota["plmn"]))
+        sst = quota["sst"].to_bytes(1, byteorder="big")
+
+        snssai_children = [
+            self._ran_parameter_element(9, "valueOctS", sst),
+        ]
+
+        if quota["sd"] is not None:
+            sd = quota["sd"].to_bytes(3, byteorder="big")
+            snssai_children.append(self._ran_parameter_element(10, "valueOctS", sd))
+
+        snssai = self._ran_parameter_structure(8, snssai_children)
+        member = self._ran_parameter_structure(
+            6,
+            [
+                self._ran_parameter_element(7, "valueOctS", plmn),
+                snssai,
+            ],
+        )
+        member_list = self._ran_parameter_list(
+            5,
+            [{"sequence-of-ranParameters": [member]}],
+        )
+        policy = self._ran_parameter_structure(3, [member_list])
+        ratio_group = self._ran_parameter_structure(
+            2,
+            [
+                policy,
+                self._ran_parameter_element(11, "valueInt", quota["min_prb_ratio"]),
+                self._ran_parameter_element(12, "valueInt", quota["max_prb_ratio"]),
+                self._ran_parameter_element(13, "valueInt", quota["dedicated_prb_ratio"]),
+            ],
+        )
+
+        return {"sequence-of-ranParameters": [ratio_group]}
+
+    def build_control_request_style_2_action_6_by_slices(self, anchor_ue_id, slice_quotas, ack_request=1):
+        """Build one Style 2, Action 6 request containing every slice quota."""
+        if isinstance(anchor_ue_id, bool) or not isinstance(anchor_ue_id, int) or not 0 <= anchor_ue_id <= 0xFFFFFFFF:
+            raise ValueError("anchor UE ID must be an integer in the range 0..4294967295")
+
+        if not isinstance(slice_quotas, (list, tuple)) or not slice_quotas:
+            raise ValueError("at least one slice quota is required")
+
+        validated_quotas = []
+        seen_ssts = set()
+
+        for raw_quota in slice_quotas:
+            quota = self._validate_slice_prb_quota(raw_quota)
+
+            if quota["sst"] in seen_ssts:
+                raise ValueError(f"more than one quota was provided for SST {quota['sst']}")
+
+            seen_ssts.add(quota["sst"])
+            validated_quotas.append(quota)
+
+        if sum(quota["min_prb_ratio"] for quota in validated_quotas) > 100:
+            raise ValueError("the sum of minimum PRB ratios cannot exceed 100")
+
+        if sum(quota["dedicated_prb_ratio"] for quota in validated_quotas) > 100:
+            raise ValueError("the sum of dedicated PRB ratios cannot exceed 100")
+
+        validated_quotas.sort(key=lambda quota: quota["sst"])
+        ratio_groups = [self._build_slice_prb_ratio_group(quota) for quota in validated_quotas]
+        ue_id = ("gNB-DU-UEID", {"gNB-CU-UE-F1AP-ID": anchor_ue_id})
+        control_header = self.e2sm_rc_compiler.pack_ric_control_header_f1(style_type=2, control_action_id=6, ue_id_tuple=ue_id)
+        control_message_definition = {
+            "ric-controlMessage-formats": (
+                "controlMessage-Format1",
+                {"ranP-List": [self._ran_parameter_list(1, ratio_groups)]},
+            ),
+        }
+        control_message = self.e2sm_rc_compiler.pack_ric_control_msg(control_message_definition)
+
+        return self._build_ric_control_request(control_header, control_message, ack_request)
+
+    def send_control_request_style_2_action_6_by_slices(self, e2_node_id, anchor_ue_id, slice_quotas, ack_request=1):
+        """Build and send one multi-slice PRB quota control request."""
+        payload = self.build_control_request_style_2_action_6_by_slices(anchor_ue_id, slice_quotas, ack_request)
+        self.parent.rmr_send(e2_node_id, payload, 12040, retries=1)
         return payload
 
+    control_slice_level_prb_quotas = send_control_request_style_2_action_6_by_slices
 
     def send_control_request_style_3_action_1(self, e2_node_id, amf_ue_ngap_id, gnb_cu_ue_f1ap_id, plmn_string, target_nr_cell_id):
         # NR CGI encoding = (PLMN Identity + NR Cell Identity)
