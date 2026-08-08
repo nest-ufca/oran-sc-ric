@@ -43,6 +43,8 @@ class xAppBase(object):
         # dict to store active subscriptions
         self.my_subscriptions = {}
 
+        self.control_response_callback = None
+
         # helper variables
         self.running = False
         
@@ -145,6 +147,27 @@ class xAppBase(object):
         #print("Pre send summary: {}".format(rmr.message_summary(sbuf)))
         sbuf = rmr.rmr_send_msg(self.rmr_client, sbuf)
 
+    def set_control_response_callback(self, callback):
+        """Register an optional callback for RIC Control ACK and Failure messages."""
+        if callback is not None and not callable(callback):
+            raise ValueError("control response callback must be callable or None")
+
+        self.control_response_callback = callback
+
+    def _handle_control_response(self, e2_agent_id, message_type, payload):
+        """Dispatch one RIC Control response to the registered callback."""
+        if message_type not in (12041, 12042):
+            raise ValueError("unsupported RIC Control response message type")
+
+        response_name = "RIC_CONTROL_ACK" if message_type == 12041 else "RIC_CONTROL_FAILURE"
+        print(f"Received {response_name}")
+
+        if self.control_response_callback is not None:
+            try:
+                self.control_response_callback(e2_agent_id, message_type, payload)
+            except Exception as e:
+                print("Error during RIC control response handling: {}".format(e))
+
     def _run(self):
         while self.running:
             try:
@@ -180,10 +203,11 @@ class xAppBase(object):
                     except Exception as e:
                         print("Error during RIC indication decoding: {}".format(e))
                         pass
-                if (summary['message type'] == 12041):
-                    print("Received RIC_CONTROL_ACK")
-                if (summary['message type'] == 12042):
-                    print("Received RIC_CONTROL_FAILURE")
+                if summary['message type'] in (12041, 12042):
+                    e2_agent_id = str(summary['meid'].decode('utf-8'))
+                    message_type = summary['message type']
+                    payload = bytes(rmr.get_payload(sbuf))
+                    self._handle_control_response(e2_agent_id, message_type, payload)
 
             rmr.rmr_free_msg(sbuf)
 
