@@ -8,14 +8,17 @@ class e2sm_types(Enum):
     E2SM_RC = 2
 
 def ntp_ts_to_datetime(ntp_timestamp):
-    # Offset between NTP and Unix epochs (1900-1970 in seconds)
+    """Convert one 64-bit NTP timestamp to a timezone-aware UTC datetime."""
+    if isinstance(ntp_timestamp, bool) or not isinstance(ntp_timestamp, int) or not 0 <= ntp_timestamp <= 0xFFFFFFFFFFFFFFFF:
+        raise ValueError("NTP timestamp must be an integer in the range 0..18446744073709551615")
+
     ntp_epoch_offset = 2208988800
+    ntp_seconds = ntp_timestamp >> 32
+    ntp_fraction = ntp_timestamp & 0xFFFFFFFF
+    unix_timestamp = ntp_seconds - ntp_epoch_offset
+    unix_timestamp += ntp_fraction / (1 << 32)
 
-    # Subtract the NTP epoch offset to get Unix timestamp
-    unix_timestamp = (ntp_timestamp >> 32) - ntp_epoch_offset
-
-    # Convert Unix timestamp to datetime
-    return datetime.datetime.utcfromtimestamp(unix_timestamp)
+    return datetime.datetime.fromtimestamp(unix_timestamp, tz=datetime.timezone.utc)
 
 class e2sm_kpm_module(object):
     def __init__(self, parent):
