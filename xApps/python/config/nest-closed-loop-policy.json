@@ -1,0 +1,20 @@
+{
+  "_comment": "External KPM-driven policy matching the validated local controller parameters.",
+  "decisionInterval": 0.5,
+  "quotaStep": 10,
+  "satisfactionHysteresis": 0.1,
+  "minimumQuota": 10,
+  "maximumQuota": 90,
+  "slices": [
+    {
+      "sliceId": 1,
+      "initialQuota": 50,
+      "throughputTargetMbps": 50.0
+    },
+    {
+      "sliceId": 2,
+      "initialQuota": 50,
+      "throughputTargetMbps": 20.0
+    }
+  ]
+}

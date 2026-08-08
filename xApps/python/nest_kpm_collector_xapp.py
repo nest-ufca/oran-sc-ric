@@ -213,7 +213,7 @@ class NestKpmCollectorXapp(xAppBase):
         indication_header,
         indication_message,
     ):
-        """Decode and display one KPM indication before normalization."""
+        """Decode, display and return one normalized KPM indication."""
         subscription = self.my_subscriptions.get(
             e2_event_instance_id
         )
@@ -269,6 +269,8 @@ class NestKpmCollectorXapp(xAppBase):
                 asdict(sample),
                 sort_dicts=False,
             )
+
+        return samples
 
     @xAppBase.start_function
     def start(
