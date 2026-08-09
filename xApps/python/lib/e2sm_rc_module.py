@@ -33,12 +33,17 @@ class e2sm_rc_module(object):
 
         return [0x80 | (length >> 8), length & 0xff]
 
-    def _build_ric_control_request(self, control_header, control_msg, ack_request):
-        requestor_id = self.get_requestor_id()
+    def _build_ric_control_request(self, control_header, control_msg, ack_request, requestor_id=None, instance_id=0):
+        if requestor_id is None:
+            requestor_id = self.get_requestor_id()
+
         ran_func_id = self.ran_func_id
 
         if isinstance(requestor_id, bool) or not isinstance(requestor_id, int) or not 0 <= requestor_id <= 65535:
             raise ValueError("RIC requestor ID must be an integer in the range 0..65535")
+
+        if isinstance(instance_id, bool) or not isinstance(instance_id, int) or not 0 <= instance_id <= 65535:
+            raise ValueError("RIC instance ID must be an integer in the range 0..65535")
 
         if isinstance(ran_func_id, bool) or not isinstance(ran_func_id, int) or not 0 <= ran_func_id <= 4095:
             raise ValueError("RAN Function ID must be an integer in the range 0..4095")
@@ -50,6 +55,7 @@ class e2sm_rc_module(object):
         control_msg = bytes(control_msg)
 
         requestor_id_bytes = requestor_id.to_bytes(2, byteorder="big")
+        instance_id_bytes = instance_id.to_bytes(2, byteorder="big")
         ran_func_id_bytes = ran_func_id.to_bytes(2, byteorder="big")
         control_header_len = len(control_header)
         control_msg_len = len(control_msg)
@@ -58,7 +64,7 @@ class e2sm_rc_module(object):
 
         body = [
             0x00, 0x00, 0x05,
-            0x00, 0x1d, 0x00, 0x05, 0x00, *requestor_id_bytes, 0x00, 0x00,
+            0x00, 0x1d, 0x00, 0x05, 0x00, *requestor_id_bytes, *instance_id_bytes,
             0x00, 0x05, 0x00, 0x02, *ran_func_id_bytes,
             0x00, 0x16, 0x00,
             *self._encode_aper_length(len(control_header_length) + control_header_len),
@@ -196,7 +202,7 @@ class e2sm_rc_module(object):
 
         return {"sequence-of-ranParameters": [ratio_group]}
 
-    def build_control_request_style_2_action_6_by_slices(self, anchor_ue_id, slice_quotas, ack_request=1):
+    def build_control_request_style_2_action_6_by_slices(self, anchor_ue_id, slice_quotas, ack_request=1, requestor_id=None, instance_id=0):
         """Build one Style 2, Action 6 request containing every slice quota."""
         if isinstance(anchor_ue_id, bool) or not isinstance(anchor_ue_id, int) or not 0 <= anchor_ue_id <= 0xFFFFFFFF:
             raise ValueError("anchor UE ID must be an integer in the range 0..4294967295")
@@ -234,11 +240,11 @@ class e2sm_rc_module(object):
         }
         control_message = self.e2sm_rc_compiler.pack_ric_control_msg(control_message_definition)
 
-        return self._build_ric_control_request(control_header, control_message, ack_request)
+        return self._build_ric_control_request(control_header, control_message, ack_request, requestor_id=requestor_id, instance_id=instance_id)
 
-    def send_control_request_style_2_action_6_by_slices(self, e2_node_id, anchor_ue_id, slice_quotas, ack_request=1):
+    def send_control_request_style_2_action_6_by_slices(self, e2_node_id, anchor_ue_id, slice_quotas, ack_request=1, requestor_id=None, instance_id=0):
         """Build and send one multi-slice PRB quota control request."""
-        payload = self.build_control_request_style_2_action_6_by_slices(anchor_ue_id, slice_quotas, ack_request)
+        payload = self.build_control_request_style_2_action_6_by_slices(anchor_ue_id, slice_quotas, ack_request, requestor_id=requestor_id, instance_id=instance_id)
         self.parent.rmr_send(e2_node_id, payload, 12040, retries=1)
         return payload
 

@@ -197,6 +197,8 @@ class PendingControl:
     """One control request awaiting ACK or Failure."""
 
     kind: str
+    requestor_id: int
+    instance_id: int
     sent_at_unix_ns: int
     quotas: Tuple[Tuple[int, int], ...]
     decision: Optional[SlicePolicyDecision]
@@ -282,23 +284,30 @@ class NestClosedLoopXapp(NestKpmCollectorXapp):
             raise ValueError("a decision control requires one policy decision")
 
         quota_items = tuple((slice_config.sst, quotas[slice_config.sst]) for slice_config in self.policy_config.slices)
-        pending = PendingControl(
-            kind=kind,
-            sent_at_unix_ns=time.time_ns(),
-            quotas=quota_items,
-            decision=decision,
-        )
 
         with self.state_lock:
             if e2_node_id in self.pending_controls:
                 raise RuntimeError(f"E2 node {e2_node_id} already has a pending control request")
 
+            requestor_id = self.e2sm_rc.get_requestor_id()
+            instance_id = 0
+            pending = PendingControl(
+                kind=kind,
+                requestor_id=requestor_id,
+                instance_id=instance_id,
+                sent_at_unix_ns=time.time_ns(),
+                quotas=quota_items,
+                decision=decision,
+            )
             self.pending_controls[e2_node_id] = pending
 
         self._log_event(
             "control-send",
             e2NodeId=e2_node_id,
             kind=kind,
+            requestorId=pending.requestor_id,
+            instanceId=pending.instance_id,
+            sentAtUnixNs=pending.sent_at_unix_ns,
             decisionNumber=decision.decision_number if decision is not None else None,
             quotas=dict(quota_items),
         )
@@ -309,6 +318,8 @@ class NestClosedLoopXapp(NestKpmCollectorXapp):
                 anchor_ue_id=self.anchor_ue_id,
                 slice_quotas=self._build_rc_quotas(dict(quota_items)),
                 ack_request=1,
+                requestor_id=pending.requestor_id,
+                instance_id=pending.instance_id,
             )
         except Exception:
             with self.state_lock:
@@ -319,6 +330,9 @@ class NestClosedLoopXapp(NestKpmCollectorXapp):
                 "control-send-error",
                 e2NodeId=e2_node_id,
                 kind=kind,
+                requestorId=pending.requestor_id,
+                instanceId=pending.instance_id,
+                sentAtUnixNs=pending.sent_at_unix_ns,
                 decisionNumber=decision.decision_number if decision is not None else None,
             )
             raise
@@ -366,6 +380,11 @@ class NestClosedLoopXapp(NestKpmCollectorXapp):
             "control-response",
             e2NodeId=e2_node_id,
             kind=pending.kind,
+            requestorId=pending.requestor_id,
+            instanceId=pending.instance_id,
+            sentAtUnixNs=pending.sent_at_unix_ns,
+            responseReceivedAtUnixNs=received_at_unix_ns,
+            sendToResponseMs=(received_at_unix_ns - pending.sent_at_unix_ns) / 1e6,
             outcome=outcome,
             decisionNumber=pending.decision.decision_number if pending.decision is not None else None,
             quotas=dict(pending.quotas),
@@ -373,11 +392,24 @@ class NestClosedLoopXapp(NestKpmCollectorXapp):
             latencyMs=(received_at_unix_ns - pending.sent_at_unix_ns) / 1e6,
         )
 
-    def process_kpm_samples(self, samples):
+    def process_kpm_samples(self, samples, indication_received_at_unix_ns=None):
         """Aggregate one indication and execute the per-node policy."""
+        if indication_received_at_unix_ns is None:
+            indication_received_at_unix_ns = time.time_ns()
+        elif isinstance(indication_received_at_unix_ns, bool) or not isinstance(indication_received_at_unix_ns, int) or indication_received_at_unix_ns < 0:
+            raise ValueError("KPM indication receive time must be a non-negative integer")
+
         expected_ssts = tuple(slice_config.sst for slice_config in self.policy_config.slices)
         window = aggregate_kpm_samples(samples, expected_ssts)
+        window_start_unix_ns = round(window.window_start * 1_000_000_000)
+        window_end_unix_ns = round(window.window_end * 1_000_000_000)
         policy = self._policy_for_node(window.e2_node_id)
+        timing_fields = {
+            "indicationReceivedAtUnixNs": indication_received_at_unix_ns,
+            "windowStartUnixNs": window_start_unix_ns,
+            "windowEndUnixNs": window_end_unix_ns,
+            "telemetryAgeMs": (indication_received_at_unix_ns - window_end_unix_ns) / 1e6,
+        }
 
         with self.state_lock:
             if window.e2_node_id not in self.active_nodes:
@@ -387,6 +419,7 @@ class NestClosedLoopXapp(NestKpmCollectorXapp):
                     reason="initial-control-not-acknowledged",
                     windowStart=window.window_start,
                     windowEnd=window.window_end,
+                    **timing_fields,
                 )
                 return None
 
@@ -397,6 +430,7 @@ class NestClosedLoopXapp(NestKpmCollectorXapp):
                     reason="control-request-pending",
                     windowStart=window.window_start,
                     windowEnd=window.window_end,
+                    **timing_fields,
                 )
                 return None
 
@@ -405,6 +439,14 @@ class NestClosedLoopXapp(NestKpmCollectorXapp):
                 window.window_end,
                 window.throughput_mbps_by_sst,
             )
+            policy_evaluated_at_unix_ns = time.time_ns()
+
+        policy_timing_fields = {
+            **timing_fields,
+            "policyEvaluatedAtUnixNs": policy_evaluated_at_unix_ns,
+            "indicationToPolicyEvaluationMs": (policy_evaluated_at_unix_ns - indication_received_at_unix_ns) / 1e6,
+            "windowEndToPolicyEvaluationMs": (policy_evaluated_at_unix_ns - window_end_unix_ns) / 1e6,
+        }
 
         if decision is None:
             self._log_event(
@@ -413,6 +455,7 @@ class NestClosedLoopXapp(NestKpmCollectorXapp):
                 windowStart=window.window_start,
                 windowEnd=window.window_end,
                 throughputMbps=window.throughput_mbps_by_sst,
+                **policy_timing_fields,
             )
             return None
 
@@ -420,6 +463,7 @@ class NestClosedLoopXapp(NestKpmCollectorXapp):
             "policy-decision",
             e2NodeId=window.e2_node_id,
             decision=asdict(decision),
+            **policy_timing_fields,
         )
 
         if not decision.changed:
@@ -431,8 +475,9 @@ class NestClosedLoopXapp(NestKpmCollectorXapp):
 
     def handle_kpm_indication(self, e2_agent_id, e2_event_instance_id, indication_header, indication_message):
         """Normalize one indication and pass it to the closed-loop policy."""
+        indication_received_at_unix_ns = time.time_ns()
         samples = super().handle_kpm_indication(e2_agent_id, e2_event_instance_id, indication_header, indication_message)
-        self.process_kpm_samples(samples)
+        self.process_kpm_samples(samples, indication_received_at_unix_ns=indication_received_at_unix_ns)
         return samples
 
     @xAppBase.start_function
