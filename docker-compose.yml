@@ -101,6 +101,8 @@ services:
     container_name: ric_appmgr
     hostname: appmgr
     image: nexus3.o-ran-sc.org:10002/o-ran-sc/ric-plt-appmgr:${APPMGR_VER}
+    depends_on:
+      - dbaas
     env_file:
       - .env
     environment:
@@ -125,6 +127,8 @@ services:
     container_name: ric_e2mgr
     hostname: e2mgr
     image: nexus3.o-ran-sc.org:10002/o-ran-sc/ric-plt-e2mgr:${E2MGR_VER}
+    depends_on:
+      - dbaas
     env_file:
       - .env
     environment:
